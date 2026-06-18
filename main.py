@@ -1,5 +1,7 @@
 import os
+import re
 import uuid
+import base64
 import subprocess
 import httpx
 import json
@@ -7,6 +9,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+from youtube_transcript_api import YouTubeTranscriptApi
 
 app = FastAPI()
 
@@ -14,9 +17,24 @@ GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 N8N_APPROVAL_WEBHOOK = os.environ["N8N_APPROVAL_WEBHOOK"]
+YOUTUBE_COOKIES_B64 = os.environ.get("YOUTUBE_COOKIES_B64", "")
 
 WORK_DIR = Path("/tmp/clips")
 WORK_DIR.mkdir(exist_ok=True)
+COOKIES_PATH = Path("/tmp/yt_cookies.txt")
+
+
+def write_cookies():
+    if YOUTUBE_COOKIES_B64:
+        COOKIES_PATH.write_bytes(base64.b64decode(YOUTUBE_COOKIES_B64))
+    return COOKIES_PATH if COOKIES_PATH.exists() else None
+
+
+def extract_video_id(url: str) -> str:
+    m = re.search(r'(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})', url)
+    if not m:
+        raise HTTPException(400, "URL do YouTube inválida")
+    return m.group(1)
 
 
 class ProcessRequest(BaseModel):
@@ -38,43 +56,20 @@ def health():
 @app.post("/process")
 async def process_video(req: ProcessRequest):
     clip_id = str(uuid.uuid4())
-    audio_path = WORK_DIR / f"{clip_id}.mp3"
+    video_id = extract_video_id(req.youtube_url)
 
-    # Download só o áudio (bem mais rápido que o vídeo)
-    result = subprocess.run(
-        [
-            "yt-dlp", "-x", "--audio-format", "mp3",
-            "--audio-quality", "5",
-                        "-o", str(audio_path),
-            req.youtube_url,
-        ],
-        capture_output=True, text=True, timeout=300,
-    )
+    # Transcrição via API nativa do YouTube (sem download, sem bot detection)
+    try:
+        transcript_list = YouTubeTranscriptApi.get_transcript(
+            video_id, languages=["pt", "pt-BR", "en", "en-US"]
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Transcrição falhou: {str(e)}")
 
-    if result.returncode != 0:
-        raise HTTPException(500, f"Download falhou: {result.stderr[:500]}")
-
-    # Transcrição via Groq Whisper — stream direto sem carregar na RAM
-    async with httpx.AsyncClient(timeout=120) as client:
-        with open(audio_path, "rb") as f:
-            transcription_resp = await client.post(
-                "https://api.groq.com/openai/v1/audio/transcriptions",
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-                files={"file": (f"{clip_id}.mp3", f, "audio/mpeg")},
-                data={"model": "whisper-large-v3", "response_format": "verbose_json"},
-            )
-
-    audio_path.unlink(missing_ok=True)
-
-    if transcription_resp.status_code != 200:
-        raise HTTPException(500, f"Transcrição falhou: {transcription_resp.text[:500]}")
-
-    transcription = transcription_resp.json()
-    transcript_text = transcription.get("text", "")
-    segments = transcription.get("segments", [])
-
+    transcript_text = " ".join(t["text"] for t in transcript_list)
     segments_text = "\n".join(
-        f"[{s['start']:.1f}s - {s['end']:.1f}s]: {s['text']}" for s in segments
+        f"[{t['start']:.1f}s - {t['start'] + t['duration']:.1f}s]: {t['text']}"
+        for t in transcript_list
     )
 
     # Análise dos melhores momentos via Groq Llama (grátis)
@@ -128,19 +123,19 @@ async def cut_video(req: CutRequest):
     output_path = WORK_DIR / f"{req.clip_id}.mp4"
     duration = req.end_time - req.start_time
 
-    # Tenta baixar só o trecho
-    # Formato 18 = 360p mp4 já mesclado (sem merge) — bem menor em RAM e disco
-    result = subprocess.run(
-        [
-            "yt-dlp",
-            "--download-sections", f"*{req.start_time}-{req.end_time}",
-            "--force-keyframes-at-cuts",
-            "--format", "18/best[height<=480][ext=mp4]/best[ext=mp4]",
-                        "-o", str(output_path),
-            req.youtube_url,
-        ],
-        capture_output=True, text=True, timeout=300,
-    )
+    cookies_path = write_cookies()
+    cmd = [
+        "yt-dlp",
+        "--download-sections", f"*{req.start_time}-{req.end_time}",
+        "--force-keyframes-at-cuts",
+        "--format", "18/best[height<=480][ext=mp4]/best[ext=mp4]",
+        "-o", str(output_path),
+    ]
+    if cookies_path:
+        cmd += ["--cookies", str(cookies_path)]
+    cmd.append(req.youtube_url)
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
     if result.returncode != 0 or not output_path.exists():
         raise HTTPException(500, f"Download do trecho falhou: {result.stderr[:500]}")
