@@ -55,19 +55,17 @@ async def process_video(req: ProcessRequest):
     if result.returncode != 0:
         raise HTTPException(500, f"Download falhou: {result.stderr[:500]}")
 
-    with open(audio_path, "rb") as f:
-        audio_data = f.read()
+    # Transcrição via Groq Whisper — stream direto sem carregar na RAM
+    async with httpx.AsyncClient(timeout=120) as client:
+        with open(audio_path, "rb") as f:
+            transcription_resp = await client.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                files={"file": (f"{clip_id}.mp3", f, "audio/mpeg")},
+                data={"model": "whisper-large-v3", "response_format": "verbose_json"},
+            )
 
     audio_path.unlink(missing_ok=True)
-
-    # Transcrição via Groq Whisper (grátis)
-    async with httpx.AsyncClient(timeout=120) as client:
-        transcription_resp = await client.post(
-            "https://api.groq.com/openai/v1/audio/transcriptions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-            files={"file": (f"{clip_id}.mp3", audio_data, "audio/mpeg")},
-            data={"model": "whisper-large-v3", "response_format": "verbose_json"},
-        )
 
     if transcription_resp.status_code != 200:
         raise HTTPException(500, f"Transcrição falhou: {transcription_resp.text[:500]}")
@@ -167,19 +165,17 @@ async def cut_video(req: CutRequest):
         if r3.returncode != 0:
             raise HTTPException(500, f"Corte falhou: {r3.stderr[:500]}")
 
-    with open(output_path, "rb") as f:
-        video_data = f.read()
-
-    output_path.unlink(missing_ok=True)
-
     storage_path = f"clips/{req.clip_id}.mp4"
 
     async with httpx.AsyncClient(timeout=120) as client:
-        upload_resp = await client.post(
-            f"{SUPABASE_URL}/storage/v1/object/video-clips/{storage_path}",
-            headers={"Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "video/mp4"},
-            content=video_data,
-        )
+        with open(output_path, "rb") as f:
+            upload_resp = await client.post(
+                f"{SUPABASE_URL}/storage/v1/object/video-clips/{storage_path}",
+                headers={"Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "video/mp4"},
+                content=f,
+            )
+
+    output_path.unlink(missing_ok=True)
 
     if upload_resp.status_code not in (200, 201):
         raise HTTPException(500, f"Upload falhou: {upload_resp.text[:500]}")
