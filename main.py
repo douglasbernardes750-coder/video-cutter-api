@@ -155,22 +155,39 @@ async def cut_video(req: CutRequest):
     output_path = WORK_DIR / f"{req.clip_id}.mp4"
     duration = req.end_time - req.start_time
 
-    cookies_path = write_cookies()
-    cmd = [
-        "yt-dlp",
-        "--download-sections", f"*{req.start_time}-{req.end_time}",
-        "--force-keyframes-at-cuts",
-        "--format", "18/best[height<=480][ext=mp4]/best[ext=mp4]",
-        "-o", str(output_path),
-    ]
+    try:
+        cookies_path = write_cookies()
+    except Exception as e:
+        raise HTTPException(500, f"Erro ao carregar cookies: {str(e)}")
+
+    # Pega URL direta do vídeo (sem baixar) — muito mais leve em memória
+    cmd_url = ["yt-dlp", "-g", "--format", "18/best[height<=480][ext=mp4]/best[ext=mp4]"]
     if cookies_path:
-        cmd += ["--cookies", str(cookies_path)]
-    cmd.append(req.youtube_url)
+        cmd_url += ["--cookies", str(cookies_path)]
+    cmd_url.append(req.youtube_url)
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    r_url = subprocess.run(cmd_url, capture_output=True, text=True, timeout=60)
+    if r_url.returncode != 0:
+        raise HTTPException(500, f"Falha ao obter URL do vídeo: {r_url.stderr[:400]}")
 
-    if result.returncode != 0 or not output_path.exists():
-        raise HTTPException(500, f"Download do trecho falhou: {result.stderr[:500]}")
+    video_url = r_url.stdout.strip().split("\n")[0]
+
+    # ffmpeg faz seek direto na URL — só baixa o trecho necessário
+    r_cut = subprocess.run(
+        [
+            "ffmpeg",
+            "-ss", str(req.start_time),
+            "-i", video_url,
+            "-t", str(duration),
+            "-c:v", "libx264", "-c:a", "aac",
+            "-movflags", "+faststart",
+            "-y", str(output_path),
+        ],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    if r_cut.returncode != 0 or not output_path.exists():
+        raise HTTPException(500, f"Corte falhou: {r_cut.stderr[:400]}")
 
     storage_path = f"clips/{req.clip_id}.mp4"
 
