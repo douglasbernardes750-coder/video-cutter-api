@@ -58,19 +58,51 @@ async def process_video(req: ProcessRequest):
     clip_id = str(uuid.uuid4())
     video_id = extract_video_id(req.youtube_url)
 
-    # Transcrição via API nativa do YouTube (sem download, sem bot detection)
+    # Tenta transcrição nativa do YouTube (rápido, sem download)
+    transcript_text = None
+    segments_text = None
     try:
         transcript_list = YouTubeTranscriptApi.get_transcript(
             video_id, languages=["pt", "pt-BR", "en", "en-US"]
         )
-    except Exception as e:
-        raise HTTPException(500, f"Transcrição falhou: {str(e)}")
+        transcript_text = " ".join(t["text"] for t in transcript_list)
+        segments_text = "\n".join(
+            f"[{t['start']:.1f}s - {t['start'] + t['duration']:.1f}s]: {t['text']}"
+            for t in transcript_list
+        )
+    except Exception:
+        pass  # Sem legendas — cai para Whisper
 
-    transcript_text = " ".join(t["text"] for t in transcript_list)
-    segments_text = "\n".join(
-        f"[{t['start']:.1f}s - {t['start'] + t['duration']:.1f}s]: {t['text']}"
-        for t in transcript_list
-    )
+    # Fallback: baixa áudio e transcreve com Whisper (usa cookies se disponível)
+    if not transcript_text:
+        audio_path = WORK_DIR / f"{clip_id}.mp3"
+        cookies_path = write_cookies()
+        cmd = ["yt-dlp", "-x", "--audio-format", "mp3", "--audio-quality", "5", "-o", str(audio_path)]
+        if cookies_path:
+            cmd += ["--cookies", str(cookies_path)]
+        cmd.append(req.youtube_url)
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            raise HTTPException(500, f"Download falhou: {result.stderr[:400]}")
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            with open(audio_path, "rb") as f:
+                tr = await client.post(
+                    "https://api.groq.com/openai/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                    files={"file": (f"{clip_id}.mp3", f, "audio/mpeg")},
+                    data={"model": "whisper-large-v3", "response_format": "verbose_json"},
+                )
+        audio_path.unlink(missing_ok=True)
+        if tr.status_code != 200:
+            raise HTTPException(500, f"Whisper falhou: {tr.text[:400]}")
+        data = tr.json()
+        transcript_text = data.get("text", "")
+        segments = data.get("segments", [])
+        segments_text = "\n".join(
+            f"[{s['start']:.1f}s - {s['end']:.1f}s]: {s['text']}" for s in segments
+        )
 
     # Análise dos melhores momentos via Groq Llama (grátis)
     async with httpx.AsyncClient(timeout=60) as client:
