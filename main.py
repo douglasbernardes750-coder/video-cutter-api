@@ -45,7 +45,7 @@ async def process_video(req: ProcessRequest):
         [
             "yt-dlp", "-x", "--audio-format", "mp3",
             "--audio-quality", "5",
-            "--js-runtimes", "nodejs",
+            "--js-runtimes", "node",
             "-o", str(audio_path),
             req.youtube_url,
         ],
@@ -137,7 +137,7 @@ async def cut_video(req: CutRequest):
             "--download-sections", f"*{req.start_time}-{req.end_time}",
             "--force-keyframes-at-cuts",
             "--format", "18/best[height<=480][ext=mp4]/best[ext=mp4]",
-            "--js-runtimes", "nodejs",
+            "--js-runtimes", "node",
             "-o", str(output_path),
             req.youtube_url,
         ],
