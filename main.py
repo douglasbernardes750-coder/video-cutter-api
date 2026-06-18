@@ -130,11 +130,13 @@ async def cut_video(req: CutRequest):
     duration = req.end_time - req.start_time
 
     # Tenta baixar só o trecho
+    # Formato 18 = 360p mp4 já mesclado (sem merge) — bem menor em RAM e disco
     result = subprocess.run(
         [
             "yt-dlp",
             "--download-sections", f"*{req.start_time}-{req.end_time}",
-            "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+            "--force-keyframes-at-cuts",
+            "--format", "18/best[height<=480][ext=mp4]/best[ext=mp4]",
             "--js-runtimes", "nodejs",
             "-o", str(output_path),
             req.youtube_url,
@@ -143,27 +145,7 @@ async def cut_video(req: CutRequest):
     )
 
     if result.returncode != 0 or not output_path.exists():
-        # Fallback: baixa o vídeo completo e corta com ffmpeg
-        full_path = WORK_DIR / f"{req.clip_id}_full.mp4"
-        r2 = subprocess.run(
-            ["yt-dlp", "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
-             "--js-runtimes", "nodejs",
-             "-o", str(full_path), req.youtube_url],
-            capture_output=True, text=True, timeout=600,
-        )
-        if r2.returncode != 0:
-            raise HTTPException(500, f"Download falhou: {r2.stderr[:500]}")
-
-        r3 = subprocess.run(
-            ["ffmpeg", "-i", str(full_path),
-             "-ss", str(req.start_time), "-t", str(duration),
-             "-c:v", "libx264", "-c:a", "aac", "-y", str(output_path)],
-            capture_output=True, text=True, timeout=120,
-        )
-        full_path.unlink(missing_ok=True)
-
-        if r3.returncode != 0:
-            raise HTTPException(500, f"Corte falhou: {r3.stderr[:500]}")
+        raise HTTPException(500, f"Download do trecho falhou: {result.stderr[:500]}")
 
     storage_path = f"clips/{req.clip_id}.mp4"
 
