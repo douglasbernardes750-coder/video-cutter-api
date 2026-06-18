@@ -44,7 +44,8 @@ async def process_video(req: ProcessRequest):
     result = subprocess.run(
         [
             "yt-dlp", "-x", "--audio-format", "mp3",
-            "--audio-quality", "5",  # qualidade média, mantém arquivo menor
+            "--audio-quality", "5",
+            "--js-runtimes", "nodejs",
             "-o", str(audio_path),
             req.youtube_url,
         ],
@@ -136,6 +137,7 @@ async def cut_video(req: CutRequest):
             "yt-dlp",
             "--download-sections", f"*{req.start_time}-{req.end_time}",
             "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+            "--js-runtimes", "nodejs",
             "-o", str(output_path),
             req.youtube_url,
         ],
@@ -147,6 +149,7 @@ async def cut_video(req: CutRequest):
         full_path = WORK_DIR / f"{req.clip_id}_full.mp4"
         r2 = subprocess.run(
             ["yt-dlp", "--format", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+             "--js-runtimes", "nodejs",
              "-o", str(full_path), req.youtube_url],
             capture_output=True, text=True, timeout=600,
         )
